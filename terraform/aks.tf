@@ -1,7 +1,7 @@
 locals {
   name        = local.environment
   environment = "control-plane"
-  region      = var.region
+  location    = var.location
 
   #cluster_version = var.kubernetes_version
 
@@ -12,6 +12,10 @@ locals {
 
   argocd_namespace = "argocd"
 
+  azure_addons = {
+    enable_azure_crossplane_provider         = try(var.addons.enable_azure_crossplane_provider, false)
+    enable_azure_crossplane_upbound_provider = try(var.addons.enable_azure_crossplane_upbound_provider, false)
+  }
   oss_addons = {
     enable_argocd                          = try(var.addons.enable_argocd, false)
     enable_argo_rollouts                   = try(var.addons.enable_argo_rollouts, false)
@@ -27,8 +31,9 @@ locals {
     enable_prometheus_adapter              = try(var.addons.enable_prometheus_adapter, false)
     enable_secrets_store_csi_driver        = try(var.addons.enable_secrets_store_csi_driver, false)
     enable_vpa                             = try(var.addons.enable_vpa, false)
+    enable_crossplane                      = try(var.addons.enable_crossplane, false)
   }
-  addons = local.oss_addons
+  addons = merge(local.azure_addons, local.oss_addons)
 
   cluster_metadata = merge(local.addons_metadata, local.workloads_metadata)
 
@@ -57,75 +62,18 @@ locals {
   }
 }
 
-module "aks" {
-  source                            = "github.com/Azure/terraform-azurerm-aks.git?ref=632deec"
-  resource_group_name               = azurerm_resource_group.this.name
-  location                          = var.region
-  kubernetes_version                = var.kubernetes_version
-  orchestrator_version              = var.kubernetes_version
-  role_based_access_control_enabled = true
-  rbac_aad                          = false
-  prefix                            = "gitops"
-  network_plugin                    = "azure"
-  vnet_subnet_id                    = lookup(module.network.vnet_subnets_name_id, "aks")
-  os_disk_size_gb                   = 50
-  sku_tier                          = "Standard"
-  private_cluster_enabled           = false
-  enable_auto_scaling               = true
-  enable_host_encryption            = false
-  log_analytics_workspace_enabled   = true
-  agents_min_count                  = 1
-  agents_max_count                  = 5
-  agents_count                      = null # Please set `agents_count` `null` while `enable_auto_scaling` is `true` to avoid possible `agents_count` changes.
-  agents_max_pods                   = 36
-  agents_pool_name                  = "system"
-  agents_availability_zones         = ["1", "2", "3"]
-  agents_type                       = "VirtualMachineScaleSets"
-  agents_size                       = var.agents_size
-  monitor_metrics                   = {}
-  azure_policy_enabled              = true
-  microsoft_defender_enabled        = true
-
-  agents_labels = {
-    "nodepool" : "defaultnodepool"
-  }
-
-  agents_tags = {
-    "Agent" : "defaultnodepoolagent"
-  }
-
-  network_policy             = "azure"
-  net_profile_dns_service_ip = "10.0.0.10"
-  net_profile_service_cidr   = "10.0.0.0/16"
-
-  network_contributor_role_assigned_subnet_ids = { "aks" = lookup(module.network.vnet_subnets_name_id, "aks") }
-
-  depends_on = [module.network]
-}
-
 ################################################################################
-# GitOps Bridge: Bootstrap
+# Resource Group: Resource
 ################################################################################
-module "gitops_bridge_bootstrap" {
-  depends_on = [module.aks]
-  source     = "gitops-bridge-dev/gitops-bridge/helm"
-
-  cluster = {
-    cluster_name = module.aks.aks_name
-    environment  = local.environment
-    metadata     = local.cluster_metadata
-    addons       = local.addons
-  }
-  apps = local.argocd_apps
-  argocd = {
-    namespace = "argocd"
-  }
-}
-
 resource "azurerm_resource_group" "this" {
-  name     = "aks-gitops"
-  location = "eastus"
+  name     = var.resource_group_name
+  location = var.location
+  tags     = var.tags
 }
+
+################################################################################
+# Virtual Network: Module
+################################################################################
 
 module "network" {
   source              = "Azure/subnets/azurerm"
@@ -140,4 +88,196 @@ module "network" {
   virtual_network_address_space = ["10.52.0.0/16"]
   virtual_network_location      = azurerm_resource_group.this.location
   virtual_network_name          = "vnet1"
+  virtual_network_tags          = var.tags
 }
+
+################################################################################
+# AKS: Module
+################################################################################
+
+module "aks" {
+  source                            = "github.com/Azure/terraform-azurerm-aks.git?ref=632deec"
+  resource_group_name               = azurerm_resource_group.this.name
+  location                          = var.location
+  kubernetes_version                = var.kubernetes_version
+  orchestrator_version              = var.kubernetes_version
+  role_based_access_control_enabled = var.role_based_access_control_enabled
+  rbac_aad                          = var.rbac_aad
+  prefix                            = var.prefix
+  network_plugin                    = var.network_plugin
+  vnet_subnet_id                    = lookup(module.network.vnet_subnets_name_id, "aks")
+  os_disk_size_gb                   = var.os_disk_size_gb
+  sku_tier                          = var.sku_tier
+  private_cluster_enabled           = var.private_cluster_enabled
+  enable_auto_scaling               = var.enable_auto_scaling
+  enable_host_encryption            = var.enable_host_encryption
+  log_analytics_workspace_enabled   = var.log_analytics_workspace_enabled
+  agents_min_count                  = var.agents_min_count
+  agents_max_count                  = var.agents_max_count
+  agents_count                      = null # Please set `agents_count` `null` while `enable_auto_scaling` is `true` to avoid possible `agents_count` changes.
+  agents_max_pods                   = var.agents_max_pods
+  agents_pool_name                  = "system"
+  agents_availability_zones         = ["1", "2", "3"]
+  agents_type                       = "VirtualMachineScaleSets"
+  agents_size                       = var.agents_size
+  monitor_metrics                   = {}
+  azure_policy_enabled              = var.azure_policy_enabled
+  microsoft_defender_enabled        = var.microsoft_defender_enabled
+  tags                              = var.tags
+
+  agents_labels = {
+    "nodepool" : "defaultnodepool"
+  }
+
+  agents_tags = {
+    "Agent" : "defaultnodepoolagent"
+  }
+
+  network_policy             = var.network_policy
+  net_profile_dns_service_ip = var.net_profile_dns_service_ip
+  net_profile_service_cidr   = var.net_profile_service_cidr
+
+  network_contributor_role_assigned_subnet_ids = { "aks" = lookup(module.network.vnet_subnets_name_id, "aks") }
+
+  depends_on = [module.network]
+}
+################################################################################
+# GitOps Bridge: Private ssh keys for git
+################################################################################
+resource "kubernetes_namespace" "argocd" {
+  metadata {
+    name = "argocd"
+  }
+  depends_on = [module.aks]
+}
+
+resource "kubernetes_secret" "git_secrets" {
+  for_each = {
+    git-addons = {
+      type          = "git"
+      url           = var.gitops_addons_org
+      sshPrivateKey = file(pathexpand(var.git_private_ssh_key))
+    }
+    git-workloads = {
+      type          = "git"
+      url           = var.gitops_workload_org
+      sshPrivateKey = file(pathexpand(var.git_private_ssh_key))
+    }
+  }
+  metadata {
+    name      = each.key
+    namespace = kubernetes_namespace.argocd.metadata[0].name
+    labels = {
+      "argocd.argoproj.io/secret-type" = "repo-creds"
+    }
+  }
+  data = each.value
+  depends_on = [kubernetes_namespace.argocd]
+}
+
+################################################################################
+# GitOps Bridge: Bootstrap
+################################################################################
+module "gitops_bridge_bootstrap" {
+  source     = "gitops-bridge-dev/gitops-bridge/helm"
+
+  cluster = {
+    cluster_name = module.aks.aks_name
+    environment  = local.environment
+    metadata = local.cluster_metadata
+    addons = local.addons
+  }
+  apps = local.argocd_apps
+  argocd = {
+    namespace = local.argocd_namespace
+  }
+  depends_on = [module.aks]
+}
+
+################################################################################
+# Service Principal: Creation
+################################################################################
+data "azuread_client_config" "current" {}
+data "azurerm_subscription" "current" {}
+
+resource "azuread_application" "registered_application" {
+  display_name = var.registered_application_name
+  owners       = [data.azuread_client_config.current.object_id]
+}
+
+resource "azuread_service_principal" "service_principal" {
+  client_id                    = azuread_application.registered_application.client_id
+  app_role_assignment_required = true
+  owners                       = [data.azuread_client_config.current.object_id]
+}
+
+resource "time_rotating" "service_principal_credentials_time_rotating" {
+  rotation_years = 2
+}
+
+resource "azuread_service_principal_password" "service_principal_password" {
+  service_principal_id = azuread_service_principal.service_principal.object_id
+  rotate_when_changed = {
+    rotation = time_rotating.service_principal_credentials_time_rotating.id
+  }
+}
+resource "azurerm_role_assignment" "service_principal_subscription_owner_role_assignment" {
+  scope                            = data.azurerm_subscription.current.id
+  role_definition_name             = "Owner"
+  principal_id                     = azuread_service_principal.service_principal.object_id
+  skip_service_principal_aad_check = true
+}
+
+################################################################################
+# Crossplane: Secret
+################################################################################
+resource "kubernetes_namespace" "crossplane" {
+  metadata {
+    name = "crossplane-system"
+  }
+  depends_on = [module.aks]
+}
+
+resource "kubernetes_secret" "crossplane_secret" {
+  type = "Opaque"
+
+  metadata {
+    name      = "azure-secret"
+    namespace = kubernetes_namespace.crossplane.metadata[0].name
+  }
+
+  data = {
+    creds = base64encode(jsonencode({
+    "clientId"                       = "${azuread_service_principal.service_principal.client_id}"
+    "clientSecret"                   = "${azuread_service_principal_password.service_principal_password.value}"
+    "subscriptionId"                 = "${data.azurerm_subscription.current.subscription_id}"
+    "tenantId"                       = "${data.azurerm_subscription.current.tenant_id}"
+    "activeDirectoryEndpointUrl"     = "https://login.microsoftonline.com"
+    "resourceManagerEndpointUrl"     = "https://management.azure.com/"
+    "activeDirectoryGraphResourceId" = "https://graph.windows.net/"
+    "sqlManagementEndpointUrl"       = "https://management.core.windows.net:8443/"
+    "galleryEndpointUrl"             = "https://gallery.azure.com/"
+    "managementEndpointUrl"          = "https://management.core.windows.net/"
+    }))
+  }
+  depends_on = [kubernetes_namespace.crossplane]
+}
+
+#resource "kubectl_manifest" "crossplane_provider_config" {
+#  yaml_body = <<-EOF
+#    apiVersion: azure.upbound.io/v1beta1
+#    metadata:
+#      name: default
+#    kind: ProviderConfig
+#    spec:
+#      credentials:
+#        source: Secret
+#        secretRef:
+#          namespace: crossplane-system
+#          name: azure-secret
+#          key: creds
+#    EOF
+#
+#  depends_on = [kubernetes_secret.crossplane_secret]
+#}
+
